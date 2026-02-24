@@ -1,0 +1,30 @@
+workers:
+  manager:
+    agent: .claude/agents/manager.md
+    schedule: "0 9 * * 1"  # Monday 9am
+    description: Weekly coordination and task assignment
+
+  code-improver:
+    agent: .claude/agents/code-improver.md
+    schedule: "0 */6 * * *"  # Every 6 hours
+    description: Improve code quality, add tests, fix lints
+
+  security-sentinel:
+    agent: .claude/agents/security-sentinel.md
+    schedule: "0 2 * * *"  # Daily 2am
+    description: Security audit — read-only invariant, path traversal
+
+  judge-agent:
+    agent: .claude/agents/judge-agent.md
+    schedule: "30 */6 * * *"  # 30 min after code-improver
+    description: Validate worker outputs, issue PASS/PARTIAL/FAIL
+
+  prompt-optimizer:
+    agent: .claude/agents/prompt-optimizer.md
+    schedule: "0 10 * * 3"  # Wednesday 10am
+    description: Benchmark retrieval quality, optimize queries
+
+  model-quality-auditor:
+    agent: .claude/agents/model-quality-auditor.md
+    schedule: "0 10 * * 5"  # Friday 10am
+    description: Benchmark embedding model performance

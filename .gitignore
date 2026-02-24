@@ -5,18 +5,22 @@ __pycache__/
 dist/
 build/
 .eggs/
+*.pyo
+*.pyd
 
 # Virtual environments
 .venv/
 venv/
 env/
+.python-version
 
 # IDE
 .vscode/
 .idea/
 *.swp
+*.swo
 
-# Data (index databases)
+# Data (index databases — never commit these)
 data/
 
 # OS
@@ -27,3 +31,8 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+.ruff_cache/
+
+# Environment
+.env
+.env.local

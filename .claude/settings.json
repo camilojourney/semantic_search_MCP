@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(pytest *)",
+      "Bash(ruff check *)",
+      "Bash(ruff format *)",
+      "Bash(pip install *)",
+      "Bash(python -m semantic_search_mcp *)"
+    ],
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(rm -rf *)"
+    ]
+  },
+  "hooks": {
+    "TaskCompleted": [
+      {
+        "type": "command",
+        "command": "cd /Users/mini/.openclaw/workspace/github/codesight && pytest tests/ -q --tb=no 2>/dev/null || true",
+        "description": "Run tests before marking task complete"
+      }
+    ]
+  }
+}
