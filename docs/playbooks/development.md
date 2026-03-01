@@ -17,14 +17,34 @@ uv pip install -e ".[dev]"
 ## Run Locally
 
 ```bash
-# Run the MCP server (STDIO mode)
-python -m semantic_search_mcp
+# Index a folder of documents
+python -m codesight index /path/to/documents
 
-# Test with MCP Inspector
-npx @modelcontextprotocol/inspector python -m semantic_search_mcp
+# Search
+python -m codesight search "payment terms" /path/to/documents
 
-# Connect to Claude Code
-claude mcp add codesight -- python -m semantic_search_mcp
+# Ask a question (requires ANTHROPIC_API_KEY)
+python -m codesight ask "What are the payment terms?" /path/to/documents
+
+# Check index status
+python -m codesight status /path/to/documents
+
+# Launch the web chat UI (requires streamlit)
+pip install -e ".[demo]"
+python -m codesight demo
+# or directly:
+streamlit run demo/app.py
+```
+
+## Python API
+
+```python
+from codesight import CodeSight
+
+engine = CodeSight("/path/to/documents")
+engine.index()
+results = engine.search("payment terms")
+answer = engine.ask("What are the payment terms?")
 ```
 
 ## Tests
@@ -43,7 +63,11 @@ ruff format src/ tests/ --check  # dry run
 ## Environment Variables
 
 See `.env.example` for all configuration options.
-Set `SEMANTIC_SEARCH_DATA_DIR` to a non-default path during testing to avoid polluting your real indexes.
+
+Key variables:
+- `ANTHROPIC_API_KEY` — required for `ask()` / Claude answer synthesis
+- `CODESIGHT_DATA_DIR` — index storage location (default: `~/.codesight/data/`)
+- `CODESIGHT_EMBEDDING_MODEL` — embedding model (default: `all-MiniLM-L6-v2`)
 
 ## Directory Layout
 

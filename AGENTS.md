@@ -3,22 +3,22 @@
 [Project Docs Index]|root: ./docs
 |IMPORTANT: Fetch specific files on demand — do not assume content
 |architecture: {ARCHITECTURE.md}
-|decisions: {docs/decisions/0001-security-invariants.md, docs/decisions/0002-lancedb-over-chromadb.md, docs/decisions/0003-hybrid-rrf-over-vector-only.md}
+|decisions: {docs/decisions/0001-lancedb-over-chromadb.md, docs/decisions/0002-hybrid-rrf-retrieval.md, docs/decisions/0003-read-only-invariant.md}
 |playbooks: {docs/playbooks/development.md, docs/playbooks/ship-feature.md, docs/playbooks/investigate-bug.md}
-|specs: {specs/README.md, specs/001-hybrid-rrf-retrieval.md, specs/002-language-aware-chunking.md, specs/003-incremental-refresh.md, specs/004-tree-sitter-ast-chunking.md}
+|specs: {specs/README.md, specs/001-core-search-tools.md, specs/002-embedding-model-config.md, specs/003-incremental-refresh.md, specs/004-tree-sitter-chunking.md}
 
 ---
 
 ## Role
 
-codesight is a local MCP server that gives Claude Code semantic search over any codebase. It runs as a subprocess communicating via STDIO JSON-RPC. The user invokes it as an MCP tool — they never interact with the code directly.
+codesight is an AI-powered document search engine. It indexes folders of documents (PDF, DOCX, PPTX, code, text) and provides hybrid BM25 + vector search with Claude answer synthesis. Users interact via a Streamlit web chat UI, CLI, or the Python API.
 
-**Primary concerns:** retrieval quality, indexing speed, zero data leakage.
+**Primary concerns:** retrieval quality, document parsing accuracy, answer quality with source citations.
 
 ## Agent Authority Matrix
 
 ### Autonomous — No confirmation needed
-- Bug fixes in chunker, embedder, search logic that don't touch security boundaries
+- Bug fixes in chunker, embedder, search, parsers that don't touch security boundaries
 - Adding tests, updating docs, improving comments
 - Reading any file in the repo
 - Running lint and tests (`ruff check`, `pytest`)
@@ -26,14 +26,15 @@ codesight is a local MCP server that gives Claude Code semantic search over any 
 
 ### Ask First — Propose, wait for approval
 - New dependencies in `pyproject.toml`
-- Changes to MCP tool signatures (`search`, `index`, `status`, `watch`, `unwatch`)
+- Changes to the `CodeSight` public API (`index`, `search`, `ask`, `status`)
 - Changes to the data directory path or index schema
 - New config environment variables
+- Changes to the Claude system prompt in `api.py`
 
 ### Never — Hard stop, escalate immediately
-- Writing to or deleting files in any indexed repository
-- Allowing `repo_path` inputs that traverse outside a validated root
-- Returning full file contents from any MCP tool (chunks + line ranges only)
+- Writing to or deleting files in any indexed folder
+- Allowing `folder_path` inputs that traverse outside a validated root
+- Returning full file contents from search (chunks + line ranges only)
 - Committing secrets or API keys
 
 ## Workers

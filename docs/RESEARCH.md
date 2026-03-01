@@ -7,27 +7,28 @@
 ## 1. Hybrid Retrieval Architecture
 
 ### Why Hybrid Matters
-Pure vector search misses exact keyword matches (function names, error codes, literal strings). Pure BM25 misses semantic synonyms and conceptual relationships. Hybrid retrieval with Reciprocal Rank Fusion (RRF) combines both with zero extra infrastructure.
+Pure vector search misses exact keyword matches (vendor names, contract numbers, dates, section references). Pure BM25 misses semantic synonyms and conceptual relationships ("payment terms" vs "billing schedule"). Hybrid retrieval with Reciprocal Rank Fusion (RRF) combines both with zero extra infrastructure.
+
+**This is CodeSight's main advantage over cloud competitors.** Most cloud search services (Azure AI Search, Glean) use vector-only search. Our hybrid approach catches what they miss.
 
 ### Implementation
 ```
 query string
-    │
-    ├──────────────────────────────────────────┐
-    │                                          │
-    ▼                                          ▼
+    |
+    +------------------------------------------+
+    |                                          |
+    v                                          v
 SQLite FTS5                                LanceDB
 BM25 keyword matching                  vector similarity
-(exact function names,                 (semantic meaning,
- error codes, literals)                 concept proximity)
-    │                                          │
-    └──────────────┬───────────────────────────┘
-                   ▼
+(exact names, dates,                   (semantic meaning,
+ contract numbers)                      concept proximity)
+    |                                          |
+    +----------------+-------------------------+
+                     v
           Reciprocal Rank Fusion
-          score = Σ 1/(k + rank_i)  where k=60
-                   │
-                   ▼
-            top K chunks
+          score = sum 1/(k + rank_i)  where k=60
+                     v
+              top K chunks
 ```
 
 ### RRF Parameters
@@ -35,133 +36,234 @@ BM25 keyword matching                  vector similarity
 - Changing k shifts recall/precision tradeoff — benchmark before modifying
 - Each retriever contributes top 20 results before fusion
 
-## 2. Chunking Strategy
+### Local vs Cloud Search Quality
 
-### Language-Aware Regex Splitting
-10 languages supported: Python, JS, TS, Go, Rust, Java, Ruby, PHP, C, C++. Splits on scope boundaries (class/function/block definitions) rather than fixed token counts.
+For **scoped document collections** (hundreds to thousands of documents), local hybrid search is competitive with cloud:
 
-Unknown languages fall back to sliding window with overlap.
+| Factor | Cloud (Azure AI Search) | CodeSight (local) |
+|--------|------------------------|-------------------|
+| Embedding model | Large (3072 dims) | Medium (384-768 dims) |
+| Keyword matching | Sometimes | Always (BM25 + FTS5) |
+| Hybrid fusion | Rare | Always (RRF) |
+| Reranking | Sometimes | Planned (cross-encoder) |
+| For 500 docs | Overkill | Right-sized |
+| For 5M docs | Correct choice | Not designed for this |
+
+**Bottom line:** For the scoped project work we deliver in consulting (500-5K documents), local hybrid search matches or beats cloud vector-only search.
+
+## 2. Embedding Models
+
+### How Local Embedding Works
+
+The embedding model runs on the machine. Downloaded once (~80-270MB), stored in `~/.cache/torch/`. No API call, no internet, no per-query charge. Ever.
+
+```
+Document text → model converts to N-dimensional vector (numbers)
+"payment terms are net 30" → [0.23, -0.11, 0.87, ...]
+Runs on CPU/GPU. Cost: $0.
+```
+
+### Model Comparison
+
+| Model | Dims | Context | Size | Quality | Local? | Cost |
+|-------|------|---------|------|---------|--------|------|
+| all-MiniLM-L6-v2 | 384 | 256 tokens | 80MB | Good | Yes | Free |
+| nomic-embed-text-v1.5 | 768 | 8192 tokens | 270MB | Better | Yes | Free |
+| mxbai-embed-large | 1024 | 512 tokens | 670MB | Best local | Yes | Free |
+| jina-embeddings-v2-base-code | 768 | 8192 tokens | 270MB | Best for code | Yes | Free |
+| text-embedding-3-large (OpenAI) | 3072 | 8191 tokens | — | Best overall | No (API) | $0.13/1M tokens |
+| voyage-3 (Voyage AI) | 1024 | 32000 tokens | — | Excellent | No (API) | $0.06/1M tokens |
+
+### Embedding Cost: Local vs API
+
+| | Local (nomic-embed-text-v1.5) | API (OpenAI text-embedding-3-large) |
+|--|-------------------------------|-------------------------------------|
+| Index 500 docs (~50K chunks) | Free, ~30 seconds | ~$5 |
+| Each search query | Free, <5ms | ~$0.0001 |
+| Monthly cost (50 users, 20 queries/day) | $0 | $50-200 |
+| Internet needed | No | Yes |
+| Data leaves machine | No | Yes |
+
+**Recommendation:** Default to `nomic-embed-text-v1.5` (local, free, good quality). Offer API embedding as an upgrade option for clients who want maximum quality and don't mind data going to an API.
+
+### Document Update Flow
+
+Only changed content gets re-embedded:
+```
+Re-index:
+   doc1.pdf → chunks → content hash changed?
+   ├── chunk 1: hash same → SKIP (no re-embed)
+   ├── chunk 2: hash changed → re-embed, store new vector
+   └── chunk 3: new chunk → embed, store
+   doc2.pdf → hash same → SKIP entirely
+```
+
+### MPS Acceleration
+On Apple Silicon Macs, sentence-transformers automatically uses MPS (Metal Performance Shaders) for GPU-accelerated embedding.
+
+### Model Mismatch Guard
+If a folder was indexed with model A and the current model is B, the dimension mismatch is detected and forces a full rebuild.
+
+## 3. LLM Answer Synthesis
+
+### How It Works
+
+Search is always local. The LLM is only called for `ask()` — to synthesize a human-readable answer from retrieved chunks.
+
+```
+question → search(question) → top 5 chunks (local, free)
+         → format chunks as context
+         → LLM call → Answer(text, sources, model)
+```
+
+### LLM Backend Options
+
+| Backend | Where it runs | Quality | Cost/question | Data leaves? | Scales to |
+|---------|--------------|---------|---------------|-------------|-----------|
+| Claude API | Anthropic cloud | Best | $0.01-0.03 | Yes (chunks) | Unlimited |
+| Azure OpenAI | Client's Azure tenant | Great | $0.01-0.03 | No (their tenant) | Unlimited |
+| OpenAI API | OpenAI cloud | Great | $0.01-0.03 | Yes (chunks) | Unlimited |
+| Ollama (local) | Same machine | Good-Decent | Free | No | ~5 concurrent users |
+| vLLM (self-hosted) | Client's GPU server | Good | Hardware cost | No | ~40 concurrent (per A100) |
+
+### Scaling Reality for Answer Synthesis
+
+```
+API (Claude / Azure OpenAI):
+   50 users × 20 questions/day = 1000 calls/day
+   Cost: $10-30/day ($300-900/month)
+   All 50 users get answers in 3-5 seconds simultaneously
+
+Local LLM (Ollama, single machine):
+   1 user: answer in 5-10 seconds ✅
+   5 users at once: last waits ~50 seconds ⚠️
+   50 users at once: not feasible ❌
+
+Self-hosted LLM (vLLM on GPU server):
+   $1,500-6,000/month for GPU hardware
+   Only makes financial sense at very high volume (5000+ questions/day)
+```
+
+**Recommendation:** For most consulting deployments (20-50 users), Claude API or Azure OpenAI. Client uses their own API key. For air-gapped environments, Ollama with a small user group.
+
+### System Prompt Design
+The system prompt instructs the LLM to:
+- Answer based only on the provided document context
+- Cite sources by file name and page/section
+- Say "I don't have enough information" rather than hallucinate
+- Keep answers concise and factual
+
+## 4. Chunking Strategy
+
+### Code Files — Language-Aware Regex Splitting
+10 languages supported: Python, JS, TS, Go, Rust, Java, Ruby, PHP, C, C++. Splits on scope boundaries (class/function/block definitions). Unknown languages fall back to sliding window with overlap.
+
+### Documents — Paragraph-Aware Splitting
+PDF, DOCX, and PPTX files are split by paragraph boundaries within pages. Each chunk gets metadata:
+- `start_line` / `end_line` = page numbers (1-indexed)
+- `scope` = heading or "page N"
+- `language` = "pdf", "docx", "pptx"
 
 ### Context Headers
 Each chunk gets a prepended context header before embedding:
 ```
-# File: src/auth/jwt.py
-# Scope: function validate_token
-# Lines: 45-82
+# File: contracts/vendor-agreement.pdf
+# Scope: section Payment Terms
+# Lines: 3-3
 ```
 
-**Why:** The embedding model needs to know WHERE a chunk lives, not just what it says. Context headers improve retrieval relevance significantly.
-
 ### Deduplication
-Content hash: `sha256(content)[:16]` per chunk. On re-index, unchanged chunks are skipped entirely — no re-embedding, no write. This makes incremental re-indexing fast.
+Content hash: `sha256(content)[:16]` per chunk. On re-index, unchanged chunks are skipped entirely.
 
-## 3. Embedding Models
+## 5. Document Parsing
 
-### Current Default
-`all-MiniLM-L6-v2` (384 dims) — fast, no API key, good general performance.
+| Format | Library | Extraction |
+|--------|---------|------------|
+| PDF | `pymupdf` (fitz) | Text per page |
+| DOCX | `python-docx` | Text per paragraph, grouped by heading sections |
+| PPTX | `python-pptx` | Text per slide, with slide title detection |
+| Code | built-in | `read_text()` → language-aware chunking |
+| Text/MD/CSV | built-in | `read_text()` → sliding window chunking |
 
-### Better Options
-| Model | Dims | Context | Notes |
-|-------|------|---------|-------|
-| all-MiniLM-L6-v2 | 384 | 256 | Default, fast, general-purpose |
-| jina-embeddings-v2-base-code | 768 | 8192 | Code-specific, longer context |
-| nomic-embed-text-v1.5 | 768 | 8192 | Long context, strong on code |
-| voyage-code-3 | 1024 | 16384 | Best code embeddings (API-only) |
-
-### MPS Acceleration
-On Apple Silicon Macs, sentence-transformers automatically uses MPS (Metal Performance Shaders) for GPU-accelerated embedding. Embedding 10K chunks takes ~30s on M1.
-
-### Model Mismatch Guard
-If a repo was indexed with model A and the current model is B, the server detects the dimension mismatch and forces a full rebuild. This prevents silent search degradation.
-
-## 4. Storage Architecture
+## 6. Storage Architecture
 
 ### LanceDB (Vector Store)
 - Serverless, file-based (no database process)
 - Columnar storage optimized for vector operations
 - Fast ANN (approximate nearest neighbor) search
-- Stores: chunk_id, embedding vector, metadata (file_path, lines, scope)
 
 ### SQLite FTS5 (Keyword Index)
 - Built into Python's sqlite3 module (no extra dependency)
 - Full-text search virtual table with BM25 ranking
-- Auto-synced via database triggers on insert/update/delete
-- Stores: chunk_id, content, file_path, line range
+- Auto-synced via database triggers
 
 ### Storage Layout
 ```
-~/.semantic-search/data/
-└── <sha256(repo_path)[:16]>/
-    ├── lancedb/          ← vector tables
-    │   └── chunks.lance
-    └── fts.db            ← SQLite FTS5
+~/.codesight/data/
++-- <sha256(folder_path)[:12]>/
+    |-- lance/            <- LanceDB vector tables
+    +-- metadata.db       <- SQLite with FTS5 virtual table
 ```
 
-All indexes live outside the indexed repo — never write inside user's codebase.
-
-## 5. MCP Protocol Integration
-
-### FastMCP Framework
-Built on `fastmcp` — lightweight MCP server framework for Python. Registers 3 tools:
-
-```python
-search(query, repo_path?, top_k?, file_glob?) → list[SearchResult]
-index(repo_path?, force_rebuild?) → IndexStatus
-status(repo_path?) → IndexStatus
-```
-
-### Tool Contract
-Tool signatures are the public API contract. Claude Code caches tool definitions — a signature change breaks active sessions. Never change without version bump.
-
-### Planned Tools (v0.3)
-```python
-watch(repo_path?) → None   # Register repo for automatic refresh
-unwatch(repo_path?) → None # Unregister
-```
-
-## 6. .gitignore-Aware File Walking
-
-Uses `pathspec` library to parse `.gitignore` patterns. Only indexes files that would be tracked by git:
-- Respects nested `.gitignore` files
-- Excludes `node_modules/`, `.git/`, build artifacts by default
-- Supports custom exclusion patterns via config
+All indexes live outside the indexed folder — never write inside the user's documents.
 
 ## 7. Performance Characteristics
 
 ### Indexing Speed
-| Repo Size | Files | Chunks | Index Time (M1) |
-|-----------|-------|--------|------------------|
-| Small (1K files) | ~1,000 | ~5,000 | ~10s |
-| Medium (10K files) | ~10,000 | ~50,000 | ~2 min |
-| Large (100K files) | ~100,000 | ~500,000 | ~20 min |
+| Collection Size | Files | Chunks | Index Time (M1) |
+|-----------------|-------|--------|------------------|
+| Small (50 docs) | ~50 | ~500 | ~5s |
+| Medium (500 docs) | ~500 | ~5,000 | ~30s |
+| Large (5K docs) | ~5,000 | ~50,000 | ~5 min |
 
 ### Search Latency
 - Vector search: ~5ms (LanceDB ANN)
 - BM25 search: ~2ms (SQLite FTS5)
 - RRF merge: ~1ms
-- **Total: <10ms** per query (after index is loaded)
+- **Search only: <10ms** (always local, always free)
+- **Full ask: 3-6s** (includes LLM API call)
 
-### Freshness
-- `SEMANTIC_SEARCH_STALE_MINUTES=60` — index is considered stale after 1 hour
-- `status()` tool reports staleness to the AI assistant
-- Incremental re-index only processes changed files (content hash comparison)
+## 8. Reranking (Planned — v0.3)
 
-## 8. Key Technical Decisions
+A cross-encoder reranker is a second model that reads the query AND each result together, scoring relevance more accurately than embedding similarity alone.
+
+```
+Without reranker:
+   search → top 8 chunks → done
+
+With reranker:
+   search → top 20 chunks → reranker scores each → top 5 → done
+```
+
+Local reranker options:
+- `ms-marco-MiniLM-L-6-v2` — small, fast, runs on laptop
+- `bge-reranker-v2-m3` — better quality, still local
+
+This is the single biggest quality upgrade remaining after better embeddings.
+
+## 9. Key Technical Decisions
 
 | Decision | Choice | Why |
 |----------|--------|-----|
 | Vector DB | LanceDB | Serverless, no process, file-based |
 | Keyword search | SQLite FTS5 | Built into Python, no dependency |
 | Fusion | RRF (k=60) | Simple, effective, no tuning needed |
-| Chunking | Language-aware regex | Preserves code scope boundaries |
-| Embedding | all-MiniLM-L6-v2 | No API key, fast, configurable |
-| MCP framework | FastMCP | Lightweight, Python-native |
-| File walking | pathspec (.gitignore) | Respects developer expectations |
+| Code chunking | Language-aware regex | Preserves code scope boundaries |
+| Doc chunking | Paragraph-aware | Respects page boundaries, preserves context |
+| Embedding | nomic-embed-text-v1.5 (target) | Local, free, good quality, 8K context |
+| Answer LLM | Pluggable (Claude/Azure/Ollama) | Client chooses trust level |
+| Doc parsing | pymupdf + python-docx + python-pptx | Well-maintained, no external services |
+| Deployment | Docker | Runs on any cloud or on-prem |
 
-## 9. Research Directions
+## 10. Research Directions
 
-1. **Code-specific embeddings** — Switch to `jina-embeddings-v2-base-code` or `voyage-code-3` for better code retrieval
-2. **Cross-repo search** — Index multiple repos and search across them with scope filtering
-3. **Watch mode** — File system watcher for real-time index updates
-4. **Reranking** — Add a cross-encoder reranker after RRF for improved precision on top results
-5. **Graph-enhanced retrieval** — Use AST parsing to build call graphs, include related functions in results
+1. **Cross-encoder reranking** — biggest remaining quality improvement
+2. **Better embeddings** — upgrade to nomic-embed-text-v1.5 as default
+3. **Pluggable LLM** — Claude, Azure OpenAI, OpenAI, Ollama backends
+4. **Cross-folder search** — index multiple folders and search across them
+5. **Enterprise connectors** — Microsoft 365 Graph API, Google Drive API
+6. **XLSX parsing** — spreadsheet support (table-aware chunking)
+7. **Email parsing** — .eml and .msg file support
+8. **OCR** — image-based PDF support via tesseract or similar
+9. **Streaming answers** — stream LLM responses for better UX
+10. **FastAPI production server** — replace Streamlit for multi-user deployments

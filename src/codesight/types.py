@@ -1,26 +1,26 @@
-"""Pydantic models for tool inputs and outputs."""
+"""Pydantic models for engine inputs and outputs."""
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class ChunkRecord(BaseModel):
-    """A single code chunk stored in the index."""
+    """A single chunk stored in the index."""
 
     chunk_id: str
     repo_path: str
-    file_path: str  # relative to repo root
-    start_line: int
+    file_path: str  # relative to folder root
+    start_line: int  # line number for code, page number for documents
     end_line: int
-    scope: str  # e.g. "class Foo > method bar"
+    scope: str  # e.g. "function foo" or "page 3" or "section Introduction"
     content: str
     content_hash: str
-    language: str
+    language: str  # e.g. "python", "pdf", "docx"
 
 
 class SearchResult(BaseModel):
-    """A single search result returned to Claude."""
+    """A single search result."""
 
     file_path: str
     start_line: int
@@ -32,7 +32,7 @@ class SearchResult(BaseModel):
 
 
 class IndexStats(BaseModel):
-    """Summary returned after indexing a repo."""
+    """Summary returned after indexing."""
 
     repo_path: str
     files_indexed: int
@@ -44,7 +44,7 @@ class IndexStats(BaseModel):
 
 
 class RepoStatus(BaseModel):
-    """Status info for an indexed repo."""
+    """Status info for an indexed folder."""
 
     repo_path: str
     indexed: bool
@@ -53,3 +53,11 @@ class RepoStatus(BaseModel):
     last_commit: str | None = None
     last_indexed_at: str | None = None
     stale: bool = False
+
+
+class Answer(BaseModel):
+    """LLM-generated answer with source citations."""
+
+    text: str
+    sources: list[SearchResult]
+    model: str

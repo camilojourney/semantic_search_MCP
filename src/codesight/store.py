@@ -6,10 +6,8 @@ querying full-text, and managing repo metadata.
 
 from __future__ import annotations
 
-import json
 import logging
 import sqlite3
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -94,7 +92,9 @@ class FTSSidecar:
         # Delete first to trigger FTS cleanup
         self.conn.execute("DELETE FROM chunks WHERE chunk_id = ?", (chunk_id,))
         self.conn.execute(
-            """INSERT INTO chunks (chunk_id, file_path, start_line, end_line, scope, language, content_hash, content)
+            """INSERT INTO chunks
+               (chunk_id, file_path, start_line, end_line,
+                scope, language, content_hash, content)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (chunk_id, file_path, start_line, end_line, scope, language, content_hash, content),
         )
@@ -141,7 +141,9 @@ class FTSSidecar:
     def get_chunk_by_id(self, chunk_id: str) -> dict | None:
         """Return full chunk metadata by ID."""
         cursor = self.conn.execute(
-            "SELECT chunk_id, file_path, start_line, end_line, scope, language, content_hash, content FROM chunks WHERE chunk_id = ?",
+            "SELECT chunk_id, file_path, start_line, end_line, "
+            "scope, language, content_hash, content "
+            "FROM chunks WHERE chunk_id = ?",
             (chunk_id,),
         )
         row = cursor.fetchone()
@@ -164,7 +166,9 @@ class FTSSidecar:
             return {}
         placeholders = ",".join("?" for _ in chunk_ids)
         cursor = self.conn.execute(
-            f"SELECT chunk_id, file_path, start_line, end_line, scope, language, content_hash, content FROM chunks WHERE chunk_id IN ({placeholders})",
+            "SELECT chunk_id, file_path, start_line, end_line, "
+            "scope, language, content_hash, content "
+            f"FROM chunks WHERE chunk_id IN ({placeholders})",
             chunk_ids,
         )
         result = {}

@@ -1,6 +1,6 @@
 """Indexing pipeline: walks files, chunks them, embeds, and stores.
 
-Handles both full indexing and incremental refresh.
+Handles code files (UTF-8 text) and binary documents (PDF, DOCX, PPTX).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pathspec
 
-from .chunker import Chunk, chunk_file
+from .chunker import Chunk, chunk_document, chunk_file
 from .config import (
     ALWAYS_SKIP_DIRS,
     ALWAYS_SKIP_FILES,
@@ -22,6 +22,7 @@ from .config import (
 )
 from .embeddings import Embedder, get_embedder
 from .git_utils import current_commit, is_git_repo
+from .parsers import extract_text, is_document
 from .store import ChunkStore
 from .types import IndexStats
 
@@ -46,9 +47,9 @@ def _load_gitignore(repo_path: Path) -> pathspec.PathSpec | None:
 
 
 def walk_repo_files(repo_path: str | Path) -> list[Path]:
-    """Walk a repo directory, respecting .gitignore and skip lists.
+    """Walk a directory, respecting .gitignore and skip lists.
 
-    Returns absolute paths to indexable files.
+    Returns absolute paths to indexable files (code + documents).
     """
     repo_path = Path(repo_path).resolve()
     gitignore = _load_gitignore(repo_path)
@@ -107,8 +108,9 @@ def index_repo(
     config: ServerConfig | None = None,
     force_rebuild: bool = False,
 ) -> IndexStats:
-    """Full or incremental index of a repository.
+    """Full or incremental index of a folder.
 
+    Handles both code files and binary documents (PDF, DOCX, PPTX).
     If force_rebuild is True, deletes existing index first.
     """
     start_time = time.time()
@@ -126,8 +128,6 @@ def index_repo(
 
     if force_rebuild and store.is_indexed:
         logger.info("Force rebuild: clearing existing index for %s", repo_path)
-        # We rebuild by walking all files, so existing data will be overwritten
-        # TODO: implement full wipe for cleanliness
 
     # Walk all indexable files
     files = walk_repo_files(repo_path)
@@ -144,39 +144,23 @@ def index_repo(
     for fpath in files:
         rel_path = str(fpath.relative_to(repo_path))
 
-        try:
-            content = fpath.read_text(encoding="utf-8", errors="ignore")
-        except Exception as e:
-            logger.warning("Could not read %s: %s", fpath, e)
-            continue
+        # Route: binary documents vs text files
+        if is_document(fpath):
+            chunks = _chunk_document_file(fpath, rel_path, config)
+        else:
+            chunks = _chunk_text_file(fpath, rel_path, config)
 
-        if not content.strip():
+        if not chunks:
             continue
 
         # Get existing chunk hashes for this file
         existing_hashes = store.fts.get_chunk_hashes(rel_path)
-
-        # Chunk the file
-        chunks = chunk_file(
-            content,
-            file_path=rel_path,
-            max_lines=config.chunk_max_lines,
-            overlap_lines=config.chunk_overlap_lines,
-        )
-
-        if not chunks:
-            continue
 
         total_files_indexed += 1
 
         # Determine which chunks need (re-)embedding
         new_chunk_ids = {c.chunk_id for c in chunks}
         old_chunk_ids = set(existing_hashes.keys())
-
-        # Delete chunks that no longer exist in this file
-        for old_id in old_chunk_ids - new_chunk_ids:
-            # This chunk was removed, but we handle deletion at the file level below
-            pass
 
         # If the file changed, remove all old chunks for it
         if new_chunk_ids != old_chunk_ids:
@@ -218,6 +202,44 @@ def index_repo(
         chunks_skipped_unchanged=total_chunks_skipped,
         total_chunks=store.chunk_count,
         elapsed_seconds=round(elapsed, 2),
+    )
+
+
+def _chunk_text_file(fpath: Path, rel_path: str, config: ServerConfig) -> list[Chunk]:
+    """Read and chunk a text-based file (code, markdown, etc.)."""
+    try:
+        content = fpath.read_text(encoding="utf-8", errors="ignore")
+    except Exception as e:
+        logger.warning("Could not read %s: %s", fpath, e)
+        return []
+
+    if not content.strip():
+        return []
+
+    return chunk_file(
+        content,
+        file_path=rel_path,
+        max_lines=config.chunk_max_lines,
+        overlap_lines=config.chunk_overlap_lines,
+    )
+
+
+def _chunk_document_file(fpath: Path, rel_path: str, config: ServerConfig) -> list[Chunk]:
+    """Parse and chunk a binary document (PDF, DOCX, PPTX)."""
+    try:
+        pages = extract_text(fpath)
+    except Exception as e:
+        logger.warning("Could not parse document %s: %s", fpath, e)
+        return []
+
+    if not pages:
+        return []
+
+    return chunk_document(
+        pages,
+        file_path=rel_path,
+        max_chars=config.doc_chunk_max_chars,
+        overlap_chars=config.doc_chunk_overlap_chars,
     )
 
 

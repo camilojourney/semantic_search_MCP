@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import logging
 
-import numpy as np
-
 from .config import BM25_CANDIDATE_MULTIPLIER, DEFAULT_TOP_K
 from .embeddings import Embedder
 from .store import ChunkStore

@@ -1,4 +1,4 @@
-"""Configuration for the semantic search MCP server."""
+"""Configuration for the CodeSight search engine."""
 
 from __future__ import annotations
 
@@ -8,20 +8,19 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 
 DATA_DIR = Path(
-    os.environ.get("SEMANTIC_SEARCH_DATA_DIR", Path.home() / ".semantic-search" / "data")
+    os.environ.get("CODESIGHT_DATA_DIR", Path.home() / ".codesight" / "data")
 )
 
 
 def repo_data_dir(repo_path: str | Path) -> Path:
-    """Return the data directory for a given repo, creating parent dirs if needed.
+    """Return the data directory for a given folder, creating parent dirs if needed.
 
-    Each repo gets its own subdirectory containing:
+    Each folder gets its own subdirectory containing:
       - LanceDB table files (vectors)
       - metadata.db (SQLite FTS5 sidecar for BM25)
     """
@@ -33,7 +32,7 @@ def repo_data_dir(repo_path: str | Path) -> Path:
 
 
 def repo_fts_db_path(repo_path: str | Path) -> Path:
-    """Return the SQLite FTS5 sidecar DB path for a given repo."""
+    """Return the SQLite FTS5 sidecar DB path for a given folder."""
     return repo_data_dir(repo_path) / "metadata.db"
 
 
@@ -46,22 +45,26 @@ DEFAULT_EMBEDDING_DIM = 384
 DEFAULT_TOP_K = 8
 DEFAULT_CHUNK_MAX_LINES = 200
 DEFAULT_CHUNK_OVERLAP_LINES = 50
+DEFAULT_DOC_CHUNK_MAX_CHARS = 1500
+DEFAULT_DOC_CHUNK_OVERLAP_CHARS = 200
 STALE_THRESHOLD_SECONDS = 300  # 5 minutes
 BM25_CANDIDATE_MULTIPLIER = 3  # fetch 3x top_k from each retriever before RRF
+
+DEFAULT_LLM_MODEL = "claude-sonnet-4-20250514"
 
 
 # ---------------------------------------------------------------------------
 # File walking
 # ---------------------------------------------------------------------------
 
-INDEXABLE_EXTENSIONS: set[str] = {
+# Code files (read as UTF-8 text, chunked by scope boundaries)
+CODE_EXTENSIONS: set[str] = {
     ".py", ".js", ".ts", ".tsx", ".jsx",
     ".go", ".rs", ".java", ".kt", ".scala",
     ".c", ".cpp", ".h", ".hpp", ".cs",
     ".rb", ".php", ".swift", ".m",
     ".sql", ".sh", ".bash", ".zsh",
     ".yaml", ".yml", ".toml", ".json",
-    ".md", ".txt", ".rst",
     ".html", ".css", ".scss",
     ".tf", ".hcl",
     ".proto", ".graphql",
@@ -70,6 +73,19 @@ INDEXABLE_EXTENSIONS: set[str] = {
     ".zig", ".nim", ".v",
     ".dockerfile",
 }
+
+# Plain text files (read as UTF-8, chunked by windows)
+TEXT_EXTENSIONS: set[str] = {
+    ".md", ".txt", ".rst", ".csv", ".log",
+}
+
+# Binary document files (parsed by parsers.py, chunked by pages/sections)
+DOCUMENT_EXTENSIONS: set[str] = {
+    ".pdf", ".docx", ".pptx",
+}
+
+# All indexable extensions
+INDEXABLE_EXTENSIONS: set[str] = CODE_EXTENSIONS | TEXT_EXTENSIONS | DOCUMENT_EXTENSIONS
 
 ALWAYS_SKIP_DIRS: set[str] = {
     ".git", "__pycache__", "node_modules", ".venv", "venv",
@@ -84,7 +100,7 @@ ALWAYS_SKIP_FILES: set[str] = {
     "go.sum", "composer.lock",
 }
 
-MAX_FILE_SIZE_BYTES = 1_000_000  # 1 MB
+MAX_FILE_SIZE_BYTES = 10_000_000  # 10 MB (documents can be large)
 
 
 class ServerConfig(BaseModel):
@@ -95,4 +111,7 @@ class ServerConfig(BaseModel):
     top_k: int = Field(default=DEFAULT_TOP_K)
     chunk_max_lines: int = Field(default=DEFAULT_CHUNK_MAX_LINES)
     chunk_overlap_lines: int = Field(default=DEFAULT_CHUNK_OVERLAP_LINES)
+    doc_chunk_max_chars: int = Field(default=DEFAULT_DOC_CHUNK_MAX_CHARS)
+    doc_chunk_overlap_chars: int = Field(default=DEFAULT_DOC_CHUNK_OVERLAP_CHARS)
     stale_threshold_seconds: int = Field(default=STALE_THRESHOLD_SECONDS)
+    llm_model: str = Field(default=DEFAULT_LLM_MODEL)

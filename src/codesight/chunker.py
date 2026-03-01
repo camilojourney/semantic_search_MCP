@@ -1,7 +1,8 @@
-"""Language-aware code chunking with scope-delimited splits.
+"""Language-aware code chunking + document chunking.
 
-Phase 1 strategy: regex-based splitting on top-level function/class boundaries,
-with context headers prepended to improve embedding quality.
+Code: regex-based splitting on top-level function/class boundaries.
+Documents: paragraph-aware splitting with page metadata.
+Both get context headers prepended to improve embedding quality.
 """
 
 from __future__ import annotations
@@ -11,8 +12,12 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import DEFAULT_CHUNK_MAX_LINES, DEFAULT_CHUNK_OVERLAP_LINES
-
+from .config import (
+    DEFAULT_CHUNK_MAX_LINES,
+    DEFAULT_CHUNK_OVERLAP_LINES,
+    DEFAULT_DOC_CHUNK_MAX_CHARS,
+    DEFAULT_DOC_CHUNK_OVERLAP_CHARS,
+)
 
 # ---------------------------------------------------------------------------
 # Language-specific boundary patterns
@@ -37,7 +42,9 @@ _BOUNDARY_PATTERNS: dict[str, re.Pattern] = {
     "ruby": re.compile(r"^(class |module |def )", re.MULTILINE),
     "php": re.compile(r"^(class |function |public |private |protected )", re.MULTILINE),
     "c": re.compile(r"^(\w+\s+\*?\w+\s*\()", re.MULTILINE),
-    "cpp": re.compile(r"^(class |struct |namespace |template |(\w+\s+\*?\w+\s*\())", re.MULTILINE),
+    "cpp": re.compile(
+        r"^(class |struct |namespace |template |(\w+\s+\*?\w+\s*\())", re.MULTILINE
+    ),
 }
 
 # Map file extension to language key
@@ -63,14 +70,14 @@ _EXT_TO_LANG: dict[str, str] = {
 
 @dataclass
 class Chunk:
-    """A single chunk of source code with metadata."""
+    """A single chunk of content with metadata."""
 
-    file_path: str  # relative to repo root
-    start_line: int  # 1-indexed
+    file_path: str  # relative to folder root
+    start_line: int  # 1-indexed (line number for code, page number for docs)
     end_line: int  # 1-indexed, inclusive
-    content: str  # raw code
-    scope: str  # e.g. "function validate_token" or "class JWTValidator"
-    language: str
+    content: str  # raw text
+    scope: str  # e.g. "function validate_token" or "page 3" or "section Introduction"
+    language: str  # e.g. "python", "pdf", "docx"
     context_header: str  # prepended before embedding
     content_hash: str = field(init=False)
 
@@ -79,7 +86,7 @@ class Chunk:
 
     @property
     def embedding_text(self) -> str:
-        """Text sent to the embedding model (context header + code)."""
+        """Text sent to the embedding model (context header + content)."""
         return f"{self.context_header}\n{self.content}"
 
     @property
@@ -99,7 +106,7 @@ def _detect_scope(first_line: str, language: str) -> str:
     if not first_line:
         return "module-level"
 
-    # Python: "def foo(...)" → "function foo"
+    # Python: "def foo(...)" -> "function foo"
     if language == "python":
         m = re.match(r"(async\s+)?def\s+(\w+)", first_line)
         if m:
@@ -154,7 +161,7 @@ def _make_context_header(file_path: str, scope: str, start_line: int, end_line: 
 
 
 # ---------------------------------------------------------------------------
-# Main chunking logic
+# Code chunking (existing)
 # ---------------------------------------------------------------------------
 
 
@@ -269,5 +276,109 @@ def _split_by_windows(
         i += max_lines - overlap_lines
         if i >= len(lines):
             break
+
+    return chunks
+
+
+# ---------------------------------------------------------------------------
+# Document chunking (new)
+# ---------------------------------------------------------------------------
+
+
+def chunk_document(
+    pages: list,  # list[DocumentPage] — import avoided for circular deps
+    file_path: str,
+    max_chars: int = DEFAULT_DOC_CHUNK_MAX_CHARS,
+    overlap_chars: int = DEFAULT_DOC_CHUNK_OVERLAP_CHARS,
+) -> list[Chunk]:
+    """Split document pages into chunks by paragraph boundaries.
+
+    Each page's text is split into paragraph-sized chunks. The page number
+    is used for start_line/end_line, and heading (if any) for scope.
+    """
+    ext = Path(file_path).suffix.lower().lstrip(".")
+    language = ext  # "pdf", "docx", "pptx"
+
+    chunks: list[Chunk] = []
+
+    for page in pages:
+        if not page.text.strip():
+            continue
+
+        scope = page.heading or f"page {page.page_number}"
+        page_chunks = _split_text_by_paragraphs(
+            text=page.text,
+            file_path=file_path,
+            page_number=page.page_number,
+            scope=scope,
+            language=language,
+            max_chars=max_chars,
+            overlap_chars=overlap_chars,
+        )
+        chunks.extend(page_chunks)
+
+    return chunks
+
+
+def _split_text_by_paragraphs(
+    text: str,
+    file_path: str,
+    page_number: int,
+    scope: str,
+    language: str,
+    max_chars: int,
+    overlap_chars: int,
+) -> list[Chunk]:
+    """Split text into chunks respecting paragraph boundaries."""
+    # Split on double newlines (paragraph breaks)
+    paragraphs = re.split(r"\n\s*\n", text)
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
+
+    if not paragraphs:
+        return []
+
+    chunks: list[Chunk] = []
+    current_text = ""
+    chunk_idx = 0
+
+    for para in paragraphs:
+        # If adding this paragraph exceeds max_chars, flush current chunk
+        if current_text and len(current_text) + len(para) + 2 > max_chars:
+            chunk_idx += 1
+            header = _make_context_header(
+                file_path, scope, page_number, page_number,
+            )
+            chunks.append(Chunk(
+                file_path=file_path,
+                start_line=page_number,
+                end_line=page_number,
+                content=current_text,
+                scope=scope,
+                language=language,
+                context_header=header,
+            ))
+            # Keep overlap from the end of current chunk
+            if overlap_chars > 0 and len(current_text) > overlap_chars:
+                current_text = current_text[-overlap_chars:]
+            else:
+                current_text = ""
+
+        if current_text:
+            current_text += "\n\n" + para
+        else:
+            current_text = para
+
+    # Flush remaining text
+    if current_text.strip():
+        header = _make_context_header(file_path, scope, page_number, page_number)
+        chunks.append(Chunk(
+            file_path=file_path,
+            start_line=page_number,
+            end_line=page_number,
+            content=current_text,
+            scope=scope,
+            language=language,
+            context_header=header,
+        ))
 
     return chunks

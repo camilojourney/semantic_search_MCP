@@ -2,27 +2,58 @@
 
 ## What It Is
 
-codesight is a semantic code search MCP server for Claude Code. It gives Claude precise, hybrid retrieval over local codebases — combining BM25 keyword search with vector semantic search and Reciprocal Rank Fusion.
+codesight is an AI-powered document search engine that you deploy for clients as a consulting tool. Point it at a folder of documents — PDFs, Word docs, presentations, code, markdown — and it indexes everything into a hybrid search index. Users ask questions in plain English and get precise answers with source citations.
+
+## The Core Business
+
+**Option B: Consulting tool — your secret weapon.**
+
+You walk into a company with a laptop. "Give me the folder of documents you need answers from." Index it, show them the web chat, they're amazed. Deliverable: a deployed instance + training. You charge for the engagement, not per user.
+
+You are not selling software. You are selling expertise + a fast way to make any document collection searchable with AI.
 
 ## The Problem
 
-Claude Code's built-in search is file-glob-based. For large codebases, finding "where does authentication happen" or "show me all error handling patterns" requires many manual searches or reading many files. This is slow and misses semantic relationships.
+Companies sit on mountains of documents — contracts, proposals, policies, technical specs, compliance records — spread across folders, drives, and systems. Finding specific information means manually searching through files, reading dozens of pages, and hoping you didn't miss anything. Knowledge workers spend 20%+ of their time searching for information.
 
 ## The Solution
 
-An MCP server that pre-indexes the codebase and serves sub-second hybrid search results. When you ask Claude to "find where JWT validation happens", it returns the top K most relevant chunks — not just filename matches.
+Point codesight at a folder. It indexes everything into a hybrid search index. Then ask questions in natural language. codesight retrieves the most relevant chunks from across all documents and uses an LLM to synthesize a precise answer with source citations.
+
+**The ultimate stack:**
+- **Search and indexing: 100% local.** Embedding model runs on the machine. No data leaves. Ever.
+- **Answer synthesis: client's choice.** Their own Claude API key, their Azure OpenAI tenant, or a local LLM (Ollama). They pick the trust level.
+- **Deployment: wherever they want.** Their Azure, their AWS, a VM, a laptop. Docker container runs anywhere.
 
 ## Key Differentiator
 
-**Hybrid BM25 + vector + RRF** — no competitor does this for a local embedded MCP server. Pure vector search misses exact keyword matches (function names, error codes). Pure BM25 misses semantic equivalence ("authenticate" vs "validate_token"). Combining both via RRF gets best-of-both-worlds results without additional infrastructure.
+**Hybrid BM25 + vector + RRF retrieval.** Most competitors (Glean, Azure AI Search, ChatPDF) use vector-only search. We combine keyword matching (BM25) with semantic search (vectors) via Reciprocal Rank Fusion. This catches what vector-only misses: exact contract numbers, dates, section references, vendor names.
+
+For scoped document collections (hundreds to thousands of documents), this hybrid approach matches or beats cloud search services — at zero ongoing search cost, with complete data privacy.
+
+## Delivery Channels
+
+1. **Web Chat UI** (Streamlit) — browser-based Q&A for non-technical users
+2. **CLI** — developer-friendly command-line interface
+3. **Slack Bot** (planned) — answer questions directly in team channels
+4. **Python API** — `CodeSight` class for programmatic integration
 
 ## Design Principles
 
-1. **Read-only** — codesight never writes to the indexed repository. Zero risk of corruption.
-2. **Zero infra** — local embeddings (no API key), embedded vector store (no server), embedded FTS (SQLite).
-3. **Simple tool surface** — 3-5 tools, not 17. Claude should not need to learn a new framework to use it.
-4. **Correct by default** — auto-index on first search, auto-refresh when stale. Works without setup.
+1. **Read-only** — codesight never writes to the indexed folder. Zero risk of data corruption.
+2. **Data stays local** — search and indexing run entirely on the machine. Only answer synthesis optionally calls an external API, and the client controls which one.
+3. **Pluggable LLM** — Claude API, Azure OpenAI, OpenAI, or Ollama (local). Client picks based on their security requirements.
+4. **Simple API** — four methods: `index()`, `search()`, `ask()`, `status()`. Any interface calls the same methods.
+5. **Deploy anywhere** — Docker container runs on Azure, AWS, GCP, on-prem, or a laptop.
 
 ## Target User
 
-A developer using Claude Code on a medium-large codebase (10K–500K lines). They want Claude to find things faster and with better context than grep-based search.
+- **Primary:** Mid-size companies (20-500 people) who need their document collections searchable with AI — delivered via consulting engagement
+- **Secondary:** Consulting firms, legal teams, and auditors who need to quickly understand large document sets for specific projects
+- **Tertiary:** Developers who want semantic search over codebases and technical documentation
+
+## What CodeSight Is NOT
+
+- **Not a replacement for Microsoft Copilot.** If they already have Copilot searching across their M365, let it. CodeSight is for scoped project work, specific document folders, or companies without Copilot.
+- **Not a SaaS product (yet).** It's a consulting deliverable. The software is the tool; the value is the engagement.
+- **Not cloud-dependent.** The core engine runs locally. Cloud is optional for the LLM answer synthesis layer.

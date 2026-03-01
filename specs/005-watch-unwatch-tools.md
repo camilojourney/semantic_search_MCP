@@ -1,39 +1,47 @@
-# Spec 005: Watch and Unwatch Tools
+# Spec 005: Automatic Re-indexing
 
-**Status:** Planned
+**Status:** deprecated
+**Phase:** TBD
+**Author:** Juan Martinez
+**Created:** 2026-02-24
+**Updated:** 2026-02-28
 
-## Summary
+## Problem
 
-Add `watch(repo_path)` and `unwatch(repo_path)` MCP tools. `watch` registers a repo for automatic background indexing. `unwatch` removes it. This eliminates the need for manual `index()` calls.
+Originally: users had to manually call `index()` to keep the search index up to date with document changes. The idea was to add `watch`/`unwatch` MCP tools for automatic background indexing.
 
-## Acceptance Criteria
+With the v0.2 pivot away from MCP to a Python API + web chat UI, the original design (MCP watch/unwatch tools) no longer applies. The current approach — auto-refresh on stale index when `search()` is called — is sufficient for consulting deployments.
 
-- [ ] `watch(repo_path)` registers repo, triggers immediate index if not yet indexed
-- [ ] `unwatch(repo_path)` removes repo from watch list
-- [ ] `status()` reports all watched repos and their freshness
-- [ ] Background refresh runs when `search()` detects stale index
-- [ ] Watch list persisted in `SEMANTIC_SEARCH_DATA_DIR` across process restarts
+## Goals (Original — Preserved for Reference)
 
-## API / Tool Surface
+- Register a folder for automatic refresh when documents change
+- Background refresh without user intervention
+- Watch list persisted across process restarts
 
-```python
-watch(repo_path: str = ".") -> WatchStatus
-unwatch(repo_path: str = ".") -> bool  # True if was watched
+## Why Deprecated
+
+1. **Auto-refresh on search** already handles staleness — when `search()` detects the index is older than `CODESIGHT_STALE_MINUTES`, it triggers a re-index automatically
+2. **Scheduled re-indexing** via cron covers the gap: `*/60 * * * * python -m codesight index /path/to/docs`
+3. **Filesystem watchers** add platform-specific complexity (inotify on Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows) with limited benefit for the consulting use case
+4. **Higher priority items**: pluggable LLM (006), reranking (007), Docker deployment (008)
+
+## If Revisited
+
+The implementation would likely be:
+
+```bash
+# CLI command that runs a background daemon
+python -m codesight watch /path/to/docs --interval 300
 ```
 
-## Edge Cases
+- Uses `watchdog` library for cross-platform filesystem events
+- Debounces changes (wait 5s after last change before re-indexing)
+- Alternatively: simple polling loop checking mtimes every N minutes
+- Logs re-index events to `~/.codesight/data/<hash>/watch.log`
 
-- Path no longer exists at process restart: log warning, remove from watch list
-- Watch list with 20+ repos: refresh runs lazily (on search), not eagerly
-- Concurrent search + refresh: lock to avoid partial reads
+## Acceptance Criteria (Original — Not Implemented)
 
-## Out of Scope
-
-- Filesystem watcher (inotify/FSEvents) — too complex, staleness-on-search is sufficient
-- Remote repo paths
-
-## Test Plan
-
-- `tests/test_watch.py` — watch/unwatch round-trip
-- Watch list persists across process restart
-- `status()` reflects watched repos correctly
+- [ ] Register a folder for automatic refresh
+- [ ] Background refresh runs when documents change
+- [ ] Watch list persisted across process restarts
+- [ ] `status()` reports watched folders and their freshness
