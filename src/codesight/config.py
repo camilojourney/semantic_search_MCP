@@ -40,8 +40,28 @@ def repo_fts_db_path(repo_path: str | Path) -> Path:
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-DEFAULT_EMBEDDING_DIM = 384
+DEFAULT_EMBEDDING_MODEL = os.environ.get(
+    "CODESIGHT_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+)
+DEFAULT_EMBEDDING_BACKEND = os.environ.get("CODESIGHT_EMBEDDING_BACKEND", "local")
+
+# Allowlist of tested embedding models with their dimensions.
+EMBEDDING_MODEL_REGISTRY: dict[str, int] = {
+    "sentence-transformers/all-MiniLM-L6-v2": 384,
+    "nomic-ai/nomic-embed-text-v1.5": 768,
+    "mixedbread-ai/mxbai-embed-large-v1": 1024,
+    "jinaai/jina-embeddings-v2-base-code": 768,
+    "text-embedding-3-large": 3072,  # OpenAI API model
+    "text-embedding-3-small": 1536,  # OpenAI API model
+}
+
+
+def resolve_embedding_dim(model_name: str) -> int:
+    """Return expected embedding dimension for a model. Falls back to 384."""
+    return EMBEDDING_MODEL_REGISTRY.get(model_name, 384)
+
+
+DEFAULT_EMBEDDING_DIM = resolve_embedding_dim(DEFAULT_EMBEDDING_MODEL)
 DEFAULT_TOP_K = 8
 DEFAULT_CHUNK_MAX_LINES = 200
 DEFAULT_CHUNK_OVERLAP_LINES = 50
@@ -51,6 +71,7 @@ STALE_THRESHOLD_SECONDS = 300  # 5 minutes
 BM25_CANDIDATE_MULTIPLIER = 3  # fetch 3x top_k from each retriever before RRF
 
 DEFAULT_LLM_MODEL = "claude-sonnet-4-20250514"
+DEFAULT_LLM_BACKEND = os.environ.get("CODESIGHT_LLM_BACKEND", "claude")
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +128,7 @@ class ServerConfig(BaseModel):
     """Runtime configuration."""
 
     embedding_model: str = Field(default=DEFAULT_EMBEDDING_MODEL)
+    embedding_backend: str = Field(default=DEFAULT_EMBEDDING_BACKEND)
     embedding_dim: int = Field(default=DEFAULT_EMBEDDING_DIM)
     top_k: int = Field(default=DEFAULT_TOP_K)
     chunk_max_lines: int = Field(default=DEFAULT_CHUNK_MAX_LINES)
@@ -114,4 +136,5 @@ class ServerConfig(BaseModel):
     doc_chunk_max_chars: int = Field(default=DEFAULT_DOC_CHUNK_MAX_CHARS)
     doc_chunk_overlap_chars: int = Field(default=DEFAULT_DOC_CHUNK_OVERLAP_CHARS)
     stale_threshold_seconds: int = Field(default=STALE_THRESHOLD_SECONDS)
+    llm_backend: str = Field(default=DEFAULT_LLM_BACKEND)
     llm_model: str = Field(default=DEFAULT_LLM_MODEL)

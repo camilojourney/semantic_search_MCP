@@ -120,7 +120,7 @@ def index_repo(
     if not repo_path.is_dir():
         raise ValueError(f"Not a directory: {repo_path}")
 
-    embedder = get_embedder(config.embedding_model, config.embedding_dim)
+    embedder = get_embedder(config.embedding_model, config.embedding_dim, backend=config.embedding_backend)
     store = ChunkStore(repo_path, embedding_dim=config.embedding_dim)
 
     # Store canonical path
@@ -188,6 +188,7 @@ def index_repo(
     if commit:
         store.last_commit = commit
     store.touch_indexed()
+    store.fts.set_meta("embedding_model", config.embedding_model)
 
     elapsed = time.time() - start_time
     logger.info(

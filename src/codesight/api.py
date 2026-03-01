@@ -12,6 +12,7 @@ from pathlib import Path
 from .config import ServerConfig
 from .embeddings import get_embedder
 from .indexer import index_repo
+from .llm import SYSTEM_PROMPT, LLMBackend, get_backend
 from .search import hybrid_search
 from .store import ChunkStore
 from .types import Answer, IndexStats, RepoStatus, SearchResult
@@ -41,6 +42,7 @@ class CodeSight:
         self.config = config or ServerConfig()
         self._store: ChunkStore | None = None
         self._embedder = None
+        self._llm: LLMBackend | None = None
 
     @property
     def store(self) -> ChunkStore:
@@ -51,8 +53,19 @@ class CodeSight:
     @property
     def embedder(self):
         if self._embedder is None:
-            self._embedder = get_embedder(self.config.embedding_model, self.config.embedding_dim)
+            self._embedder = get_embedder(
+                self.config.embedding_model,
+                self.config.embedding_dim,
+                backend=self.config.embedding_backend,
+            )
         return self._embedder
+
+    @property
+    def llm(self) -> LLMBackend:
+        """Lazy-loaded LLM backend. Only initialized when ask() is called."""
+        if self._llm is None:
+            self._llm = get_backend(self.config.llm_backend, model=self.config.llm_model)
+        return self._llm
 
     def index(self, force_rebuild: bool = False) -> IndexStats:
         """Index all documents in the folder.
@@ -76,12 +89,13 @@ class CodeSight:
         )
 
     def ask(self, question: str, top_k: int = 5, file_glob: str | None = None) -> Answer:
-        """Ask a question — search + Claude API answer synthesis.
+        """Ask a question — search + LLM answer synthesis.
 
-        Retrieves the top matching chunks, sends them as context to Claude,
-        and returns a natural language answer with source citations.
+        Retrieves the top matching chunks, sends them as context to the
+        configured LLM backend, and returns a natural language answer
+        with source citations.
 
-        Requires ANTHROPIC_API_KEY environment variable.
+        Backend is selected via CODESIGHT_LLM_BACKEND env var (default: claude).
         """
         results = self.search(question, top_k=top_k, file_glob=file_glob)
 
@@ -89,7 +103,7 @@ class CodeSight:
             return Answer(
                 text="No relevant documents found. Try indexing first.",
                 sources=[],
-                model=self.config.llm_model,
+                model=self.llm.model_id,
             )
 
         # Build context from search results
@@ -100,17 +114,18 @@ class CodeSight:
             )
         context = "\n\n---\n\n".join(context_parts)
 
-        # Call Claude API
-        answer_text = _call_claude(
-            question=question,
-            context=context,
-            model=self.config.llm_model,
+        user_prompt = (
+            f"Based on the following documents, answer this question:\n\n"
+            f"**Question:** {question}\n\n"
+            f"**Documents:**\n\n{context}"
         )
+
+        answer_text = self.llm.generate(SYSTEM_PROMPT, user_prompt)
 
         return Answer(
             text=answer_text,
             sources=results,
-            model=self.config.llm_model,
+            model=self.llm.model_id,
         )
 
     def status(self) -> RepoStatus:
@@ -126,13 +141,27 @@ class CodeSight:
         )
 
     def _ensure_indexed(self) -> None:
-        """Auto-index if not indexed, auto-refresh if stale."""
+        """Auto-index if not indexed, auto-refresh if stale, rebuild on model mismatch."""
         if not self.store.is_indexed:
             logger.info("No index found for %s — building now...", self.folder_path)
             self.index()
+        elif self._embedding_model_changed():
+            stored = self.store.fts.get_meta("embedding_model") or "unknown"
+            logger.warning(
+                "Embedding model changed (%s → %s). Forcing full rebuild.",
+                stored, self.config.embedding_model,
+            )
+            self.index(force_rebuild=True)
         elif self._is_stale():
             logger.info("Index is stale for %s — refreshing...", self.folder_path)
             self.index()
+
+    def _embedding_model_changed(self) -> bool:
+        """Check if the configured embedding model differs from the indexed one."""
+        stored_model = self.store.fts.get_meta("embedding_model")
+        if stored_model is None:
+            return False  # legacy index without model tracking — don't force rebuild
+        return stored_model != self.config.embedding_model
 
     def _is_stale(self) -> bool:
         """Check if the index is older than the staleness threshold."""
@@ -147,29 +176,3 @@ class CodeSight:
             return True
 
 
-def _call_claude(question: str, context: str, model: str) -> str:
-    """Send question + context to Claude API and return the answer text."""
-    import anthropic
-
-    client = anthropic.Anthropic()  # uses ANTHROPIC_API_KEY env var
-
-    system_prompt = (
-        "You are a helpful document assistant. Answer questions based ONLY on the "
-        "provided source documents. If the answer is not in the sources, say so. "
-        "Always cite which source(s) your answer comes from using [Source N] notation."
-    )
-
-    user_message = (
-        f"Based on the following documents, answer this question:\n\n"
-        f"**Question:** {question}\n\n"
-        f"**Documents:**\n\n{context}"
-    )
-
-    message = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
-
-    return message.content[0].text
