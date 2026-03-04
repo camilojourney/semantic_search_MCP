@@ -46,11 +46,13 @@ _reranker_disabled_for_session = False
 
 def _get_reranker(model_name: str):
     """Lazy-load the cross-encoder model (cached for process lifetime)."""
+    # SPEC-007-002: Model is loaded lazily and reused across process lifetime.
     global _reranker_model, _reranker_model_name, _reranker_disabled_for_session
     if _reranker_disabled_for_session:
         return None
 
     if _reranker_model is None or _reranker_model_name != model_name:
+        # EDGE-007-001: First-use model cache miss triggers one-time download/load.
         logger.info("Loading reranker model: %s", model_name)
         try:
             from sentence_transformers import CrossEncoder

@@ -100,6 +100,7 @@ class CodeSight:
         if not force_rebuild and self.store.is_indexed and self._embedding_model_changed():
             stored_model = self.store.fts.get_meta("embedding_model") or "unknown"
             stored_dim = self.store.fts.get_meta("embedding_dim") or "?"
+            # EDGE-002-004: Mid-index model mismatch forces safe full rebuild.
             logger.warning(
                 "Embedding model changed (%s %sd -> %s %dd). Rebuilding index from scratch.",
                 stored_model,
@@ -118,6 +119,7 @@ class CodeSight:
         self, query: str, top_k: int = 8, file_glob: str | None = None,
     ) -> list[SearchResult]:
         """Hybrid BM25 + vector search. Auto-indexes if needed."""
+        # SPEC-006-002: search() remains local and does not call LLM backends.
         self._ensure_indexed()
         return hybrid_search(
             self.store, self.embedder, query,
@@ -181,6 +183,7 @@ class CodeSight:
                 return Answer(
                     text=answer_text,
                     sources=results,
+                    # SPEC-006-004: Answer.model reports backend:model attribution.
                     model=self.llm.model_id,
                     grounding_score=None,
                     citations=[],

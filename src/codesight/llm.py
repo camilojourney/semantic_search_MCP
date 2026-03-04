@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# System prompt shared across ALL backends — same answer quality expectations.
+# SPEC-006-003: System prompt is shared across all backend adapters.
 SYSTEM_PROMPT = (
     "You are a helpful document assistant. Answer questions based ONLY on the "
     "provided source documents. If the answer is not in the sources, say so. "
@@ -117,7 +117,9 @@ class ClaudeBackend:
 
     def __init__(self, model: str = "claude-sonnet-4-20250514") -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY")
+        # SPEC-006-005: Credential validation names required env vars clearly.
         if not api_key:
+            # EDGE-006-006: Default backend without key gives explicit local fallback.
             raise ValueError(
                 "ANTHROPIC_API_KEY environment variable is required for the Claude backend. "
                 "Set it or switch to a different backend: CODESIGHT_LLM_BACKEND=ollama"
@@ -252,6 +254,7 @@ class AzureOpenAIBackend:
             response = _run_cloud_call_with_retry("azure", _call)
         except Exception as exc:
             if _is_not_found_error(exc):
+                # EDGE-006-003: Deployment name mismatches are surfaced clearly.
                 raise ValueError(
                     f"Azure OpenAI deployment '{self._deployment}' not found. Verify "
                     "AZURE_OPENAI_DEPLOYMENT matches an active deployment in your Azure tenant."
@@ -349,12 +352,14 @@ class OllamaBackend:
         try:
             resp = httpx.post(url, json=payload, timeout=60.0)
         except httpx.ConnectError:
+            # EDGE-006-001: Missing Ollama server has explicit startup guidance.
             raise ConnectionError(
                 f"Ollama server not found at {self._base_url}. "
                 "Start it with: ollama serve"
             ) from None
 
         if resp.status_code == 404:
+            # EDGE-006-002: Missing Ollama model includes pull command.
             raise ValueError(
                 f"Model '{self._model}' not found in Ollama. "
                 f"Download it with: ollama pull {self._model}"
