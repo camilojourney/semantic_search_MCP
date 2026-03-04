@@ -112,7 +112,7 @@ engine.status() -> RepoStatus
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
-| RRF k constant | 60 | Standard from RRF paper (Cormack et al.), proven effective |
+| RRF k constant | 60 | Standard from RRF paper (Cormack et al.), proven effective. Default starting point; per-domain A/B testing recommended per RESEARCH.md §1.1 (RRF is significantly domain-dependent). |
 | BM25 top N | 20 | Feed 20 keyword results into RRF |
 | Vector top N | 20 | Feed 20 semantic results into RRF |
 | Default top_k | 8 (search), 5 (ask) | Balance completeness vs noise |
@@ -157,7 +157,7 @@ File on disk
 ### Alternative A: Vector-only search (no BM25)
 
 Trade-off: Simpler implementation, but misses exact keyword matches (contract numbers, dates, vendor names).
-Rejected because: Hybrid BM25+vector+RRF is our key differentiator. It catches what vector-only misses.
+Rejected because: Hybrid BM25+vector+RRF is table stakes (Azure AI Search, Onyx, RAGFlow ship it natively). CodeSight differentiates on: $0 local-first search, pluggable LLM backends, and the strategy router (v0.5).
 
 ### Alternative B: Cloud-hosted vector DB (Pinecone, Weaviate)
 
