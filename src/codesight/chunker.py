@@ -8,9 +8,11 @@ Both get context headers prepended to improve embedding quality.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .config import (
     DEFAULT_CHUNK_MAX_LINES,
@@ -18,6 +20,8 @@ from .config import (
     DEFAULT_DOC_CHUNK_MAX_CHARS,
     DEFAULT_DOC_CHUNK_OVERLAP_CHARS,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Language-specific boundary patterns
@@ -60,6 +64,45 @@ _EXT_TO_LANG: dict[str, str] = {
     ".c": "c", ".h": "c",
     ".cpp": "cpp", ".hpp": "cpp", ".cc": "cpp", ".cxx": "cpp",
     ".cs": "java",  # close enough for boundary detection
+}
+
+# ---------------------------------------------------------------------------
+# AST chunking config
+# ---------------------------------------------------------------------------
+
+AST_MAX_CHARS = 1500
+AST_MIN_CHARS = 100
+AST_MAX_TREE_DEPTH = 5
+AST_PARSE_ERROR_THRESHOLD = 0.20
+
+_AST_SCOPE_NODE_TYPES: dict[str, set[str]] = {
+    "python": {"function_definition", "class_definition"},
+    "javascript": {"function_declaration", "class_declaration", "arrow_function"},
+    "typescript": {
+        "function_declaration",
+        "class_declaration",
+        "interface_declaration",
+        "arrow_function",
+    },
+    "go": {"function_declaration", "method_declaration", "type_declaration"},
+    "rust": {"function_item", "impl_item", "struct_item", "enum_item"},
+    "java": {"method_declaration", "class_declaration", "interface_declaration"},
+    "ruby": {"method", "class", "module"},
+    "php": {"function_definition", "class_declaration", "method_declaration"},
+    "c": {"function_definition", "struct_specifier"},
+    "cpp": {"function_definition", "class_specifier", "namespace_definition"},
+}
+
+_AST_CONTAINER_NODE_TYPES = {
+    "program",
+    "module",
+    "block",
+    "body",
+    "class_body",
+    "declaration_list",
+    "source_file",
+    "translation_unit",
+    "impl_item_list",
 }
 
 
@@ -161,7 +204,336 @@ def _make_context_header(file_path: str, scope: str, start_line: int, end_line: 
 
 
 # ---------------------------------------------------------------------------
-# Code chunking (existing)
+# AST chunking helpers
+# ---------------------------------------------------------------------------
+
+
+def _load_tree_sitter_parser(language: str) -> Any | None:
+    """Lazy-load a tree-sitter parser for a language from the bundled grammars."""
+    try:
+        from tree_sitter_languages import get_parser
+    except Exception:
+        return None
+
+    try:
+        return get_parser(language)
+    except Exception:
+        return None
+
+
+def _node_text(source: bytes, node: Any) -> str:
+    return source[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+
+
+def _first_identifier(node: Any) -> Any | None:
+    for child in getattr(node, "children", []):
+        if getattr(child, "type", "") in {"identifier", "name", "constant", "type_identifier"}:
+            return child
+    return None
+
+
+def _node_name_text(source: bytes, node: Any) -> str | None:
+    name_node = None
+    if hasattr(node, "child_by_field_name"):
+        name_node = node.child_by_field_name("name")
+    if name_node is None:
+        name_node = _first_identifier(node)
+    if name_node is None and getattr(node, "type", "") == "arrow_function":
+        parent = getattr(node, "parent", None)
+        if parent is not None and hasattr(parent, "child_by_field_name"):
+            name_node = parent.child_by_field_name("name")
+        if name_node is None and parent is not None:
+            name_node = _first_identifier(parent)
+    if name_node is None:
+        return None
+    name = _node_text(source, name_node).strip()
+    return name or None
+
+
+def _scope_prefix(node_type: str) -> str:
+    if node_type in {
+        "function_definition",
+        "function_declaration",
+        "method_declaration",
+        "function_item",
+        "method",
+        "method_definition",
+        "arrow_function",
+    }:
+        return "function"
+    if node_type in {"class_definition", "class_declaration", "class_specifier", "class"}:
+        return "class"
+    if node_type in {"interface_declaration"}:
+        return "interface"
+    if node_type in {"module", "namespace_definition"}:
+        return "module"
+    if node_type in {"struct_item", "struct_specifier"}:
+        return "struct"
+    if node_type in {"enum_item"}:
+        return "enum"
+    if node_type in {"impl_item"}:
+        return "impl"
+    if node_type in {"type_declaration"}:
+        return "type"
+    return node_type.replace("_", " ")
+
+
+def _scope_label(source: bytes, node: Any) -> str:
+    node_type = getattr(node, "type", "")
+    prefix = _scope_prefix(node_type)
+    name = _node_name_text(source, node)
+    if name:
+        return f"{prefix} {name}"
+    return prefix
+
+
+def _is_error_node(node: Any) -> bool:
+    return getattr(node, "type", "") == "ERROR" or bool(getattr(node, "has_error", False))
+
+
+def _count_top_level_errors(root_node: Any) -> tuple[int, int]:
+    top_level = [n for n in getattr(root_node, "children", []) if getattr(n, "is_named", False)]
+    if not top_level:
+        return 0, 0
+    error_count = sum(1 for n in top_level if _is_error_node(n))
+    return error_count, len(top_level)
+
+
+def _direct_scope_children(node: Any, language: str) -> list[Any]:
+    """Find direct child scopes while traversing through syntax container nodes."""
+    scope_types = _AST_SCOPE_NODE_TYPES.get(language, set())
+    if not scope_types:
+        return []
+
+    found: list[Any] = []
+    queue = list(getattr(node, "children", []))
+    while queue:
+        current = queue.pop(0)
+        if not getattr(current, "is_named", False):
+            continue
+        if _is_error_node(current):
+            continue
+        if current.type in scope_types:
+            found.append(current)
+            continue
+        if current.type in _AST_CONTAINER_NODE_TYPES or current.type.endswith("_body"):
+            queue.extend(list(getattr(current, "children", [])))
+    return found
+
+
+def _split_leaf_by_statement_boundaries(
+    source_text: str,
+    max_chars: int,
+) -> list[tuple[int, int, str]]:
+    """Split a large scope by statement-ish boundaries instead of raw offsets."""
+    lines = source_text.splitlines()
+    if not lines:
+        return []
+
+    segments: list[tuple[int, int, str]] = []
+    start = 0
+    buf: list[str] = []
+    char_count = 0
+    for idx, line in enumerate(lines):
+        buf.append(line)
+        char_count += len(line) + 1
+        boundary = (
+            not line.strip()
+            or line.rstrip().endswith(";")
+            or line.rstrip().endswith("{")
+            or line.rstrip().endswith("}")
+            or line.rstrip().endswith(":")
+        )
+        if boundary and char_count >= max_chars:
+            segments.append((start, idx, "\n".join(buf).strip("\n")))
+            start = idx + 1
+            buf = []
+            char_count = 0
+
+    if buf:
+        segments.append((start, len(lines) - 1, "\n".join(buf).strip("\n")))
+    return [(s, e, text) for s, e, text in segments if text.strip()]
+
+
+def _emit_chunk(
+    *,
+    chunks: list[Chunk],
+    file_path: str,
+    scope_path: list[str],
+    start_line: int,
+    end_line: int,
+    content: str,
+    language: str,
+) -> None:
+    # SPEC-004-002: Embed full hierarchical scope path in context headers.
+    scope = " > ".join(scope_path) if scope_path else "module"
+    header = _make_context_header(file_path, scope, start_line, end_line)
+    chunks.append(
+        Chunk(
+            file_path=file_path,
+            start_line=start_line,
+            end_line=end_line,
+            content=content,
+            scope=scope,
+            language=language,
+            context_header=header,
+        )
+    )
+
+
+def _collect_ast_chunks(
+    *,
+    node: Any,
+    source: bytes,
+    file_path: str,
+    language: str,
+    scope_path: list[str],
+    max_chars: int,
+    min_chars: int,
+    depth: int,
+    max_tree_depth: int,
+    chunks: list[Chunk],
+) -> None:
+    node_content = _node_text(source, node)
+    if not node_content.strip():
+        return
+
+    start_line = getattr(node, "start_point")[0] + 1
+    end_line = getattr(node, "end_point")[0] + 1
+
+    # SPEC-004-003: Oversized AST scopes recurse into child scopes first.
+    if len(node_content) > max_chars:
+        # EDGE-004-003: Stop recursion at bounded max_tree_depth.
+        if depth >= max_tree_depth:
+            _emit_chunk(
+                chunks=chunks,
+                file_path=file_path,
+                scope_path=scope_path,
+                start_line=start_line,
+                end_line=end_line,
+                content=node_content,
+                language=language,
+            )
+            return
+
+        child_scopes = _direct_scope_children(node, language)
+        if child_scopes:
+            for child in sorted(child_scopes, key=lambda n: n.start_byte):
+                child_label = _scope_label(source, child)
+                _collect_ast_chunks(
+                    node=child,
+                    source=source,
+                    file_path=file_path,
+                    language=language,
+                    scope_path=[*scope_path, child_label],
+                    max_chars=max_chars,
+                    min_chars=min_chars,
+                    depth=depth + 1,
+                    max_tree_depth=max_tree_depth,
+                    chunks=chunks,
+                )
+            return
+
+        # EDGE-004-005: Leaf oversized scopes split by statement boundaries.
+        leaf_segments = _split_leaf_by_statement_boundaries(node_content, max_chars=max_chars)
+        if leaf_segments:
+            for start_offset, end_offset, segment in leaf_segments:
+                segment_start = start_line + start_offset
+                segment_end = start_line + end_offset
+                _emit_chunk(
+                    chunks=chunks,
+                    file_path=file_path,
+                    scope_path=scope_path,
+                    start_line=segment_start,
+                    end_line=segment_end,
+                    content=segment,
+                    language=language,
+                )
+            return
+
+    _emit_chunk(
+        chunks=chunks,
+        file_path=file_path,
+        scope_path=scope_path,
+        start_line=start_line,
+        end_line=end_line,
+        content=node_content,
+        language=language,
+    )
+
+
+def _chunk_file_ast(
+    content: str,
+    file_path: str,
+    language: str,
+    max_chars: int = AST_MAX_CHARS,
+    min_chars: int = AST_MIN_CHARS,
+    max_tree_depth: int = AST_MAX_TREE_DEPTH,
+) -> tuple[list[Chunk] | None, str]:
+    """Try AST chunking; return (chunks, fallback_mode) where mode is 'none'/'regex'/'sliding'."""
+    source = content.encode("utf-8", errors="ignore")
+    parser = _load_tree_sitter_parser(language)
+    if parser is None:
+        logger.debug(
+            "No tree-sitter parser for %s; using sliding fallback for %s",
+            language,
+            file_path,
+        )
+        return None, "sliding"
+
+    try:
+        tree = parser.parse(source)
+    except Exception:
+        logger.warning(
+            "AST parse failed for %s: parser exception - falling back to regex chunking",
+            file_path,
+        )
+        return None, "regex"
+
+    root_node = getattr(tree, "root_node", None)
+    if root_node is None:
+        return None, "regex"
+
+    error_count, top_count = _count_top_level_errors(root_node)
+    if top_count > 0 and (error_count / top_count) > AST_PARSE_ERROR_THRESHOLD:
+        # SPEC-004-005
+        # EDGE-004-001: Severe syntax errors trigger regex fallback with warning.
+        logger.warning(
+            "AST parse failed for %s: %d ERROR nodes - falling back to regex chunking",
+            file_path,
+            error_count,
+        )
+        return None, "regex"
+
+    scope_nodes = _direct_scope_children(root_node, language)
+    if not scope_nodes:
+        return None, "regex"
+
+    chunks: list[Chunk] = []
+    for node in sorted(scope_nodes, key=lambda n: n.start_byte):
+        if _is_error_node(node):
+            continue
+        label = _scope_label(source, node)
+        _collect_ast_chunks(
+            node=node,
+            source=source,
+            file_path=file_path,
+            language=language,
+            scope_path=[label],
+            max_chars=max_chars,
+            min_chars=min_chars,
+            depth=0,
+            max_tree_depth=max_tree_depth,
+            chunks=chunks,
+        )
+
+    if chunks:
+        return chunks, "none"
+    return None, "regex"
+
+
+# ---------------------------------------------------------------------------
+# Code chunking
 # ---------------------------------------------------------------------------
 
 
@@ -177,27 +549,57 @@ def chunk_file(
     max_lines: int = DEFAULT_CHUNK_MAX_LINES,
     overlap_lines: int = DEFAULT_CHUNK_OVERLAP_LINES,
 ) -> list[Chunk]:
-    """Split a file's content into scope-delimited chunks.
-
-    Strategy:
-    1. If we have a language-specific boundary pattern, split on those boundaries.
-    2. Each split becomes a chunk (unless it exceeds max_lines, in which case
-       we sub-split with overlapping windows).
-    3. If no pattern is available, fall back to overlapping windows.
-    """
+    """Split source into chunks, preferring AST chunking for supported code languages."""
+    # EDGE-004-004: Empty/whitespace-only files never emit chunks.
     if not content.strip():
         return []
 
+    language = _detect_language(file_path)
+
+    # EDGE-004-006: Binary-ish text misidentified as code is skipped.
+    if "\x00" in content:
+        logger.debug("Skipping binary-like file content for %s", file_path)
+        return []
+
+    # SPEC-004-001: Route supported code languages through AST chunking.
+    if language in _AST_SCOPE_NODE_TYPES:
+        ast_chunks, fallback_mode = _chunk_file_ast(content, file_path, language)
+        if ast_chunks is not None:
+            return ast_chunks
+        if fallback_mode == "regex":
+            return _chunk_file_regex(
+                content,
+                file_path=file_path,
+                max_lines=max_lines,
+                overlap_lines=overlap_lines,
+            )
+        if fallback_mode == "sliding":
+            lines = content.split("\n")
+            return _split_by_windows(lines, file_path, language, max_lines, overlap_lines)
+
+    # SPEC-004-004: Unsupported languages use the existing window fallback.
+    # EDGE-004-002: Mixed-language HTML/script files are treated as plain text windows.
+    return _chunk_file_regex(
+        content,
+        file_path=file_path,
+        max_lines=max_lines,
+        overlap_lines=overlap_lines,
+    )
+
+
+def _chunk_file_regex(
+    content: str,
+    *,
+    file_path: str,
+    max_lines: int,
+    overlap_lines: int,
+) -> list[Chunk]:
     lines = content.split("\n")
     language = _detect_language(file_path)
     pattern = _BOUNDARY_PATTERNS.get(language)
-
     if pattern:
-        chunks = _split_by_boundaries(lines, file_path, language, pattern, max_lines, overlap_lines)
-    else:
-        chunks = _split_by_windows(lines, file_path, language, max_lines, overlap_lines)
-
-    return chunks
+        return _split_by_boundaries(lines, file_path, language, pattern, max_lines, overlap_lines)
+    return _split_by_windows(lines, file_path, language, max_lines, overlap_lines)
 
 
 def _split_by_boundaries(
@@ -286,7 +688,7 @@ def _split_by_windows(
 
 
 def chunk_document(
-    pages: list,  # list[DocumentPage] — import avoided for circular deps
+    pages: list,  # list[DocumentPage] - import avoided for circular deps
     file_path: str,
     max_chars: int = DEFAULT_DOC_CHUNK_MAX_CHARS,
     overlap_chars: int = DEFAULT_DOC_CHUNK_OVERLAP_CHARS,
