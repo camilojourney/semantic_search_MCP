@@ -37,6 +37,7 @@ class CodeSight:
 
     Usage:
         engine = CodeSight("/path/to/documents")
+        workspace_engine = CodeSight(workspace="Sales KB")
         engine.index()
         results = engine.search("payment terms")
         answer = engine.ask("What are the payment terms in the contract?")
@@ -44,10 +45,32 @@ class CodeSight:
 
     def __init__(
         self,
-        folder_path: str | Path,
+        folder_path: str | Path | None = None,
         config: ServerConfig | None = None,
+        *,
+        workspace: str | None = None,
     ) -> None:
-        self.folder_path = Path(folder_path).expanduser().resolve()
+        if workspace is not None:
+            if folder_path is not None:
+                raise ValueError("Provide either folder_path or workspace, not both.")
+
+            # // SPEC-013-005: Workspace mode resolves one canonical workspace directory.
+            from .workspace import WorkspaceManager
+
+            manager = WorkspaceManager()
+            workspace_row = manager.get(workspace)
+            resolved_folder = manager.ensure_workspace_storage(workspace_row.id)
+            self.workspace_id: str | None = workspace_row.id
+            self.workspace_name: str | None = workspace_row.name
+        else:
+            if folder_path is None:
+                raise ValueError("folder_path is required when workspace is not specified.")
+            # // SPEC-013-008: Legacy path mode remains unchanged when workspace is omitted.
+            resolved_folder = Path(folder_path).expanduser().resolve()
+            self.workspace_id = None
+            self.workspace_name = None
+
+        self.folder_path = Path(resolved_folder).expanduser().resolve()
         if not self.folder_path.is_dir():
             raise ValueError(f"Not a directory: {self.folder_path}")
 
