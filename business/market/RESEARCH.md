@@ -167,3 +167,62 @@ For air-gapped deployments, LLM inference runs on customer hardware.
 | Upfront (hardware + deployment) | $115,000 | $0 |
 | Monthly ongoing | $16,700 | $16,700 |
 | **Your revenue (license + support)** | **$12,000/mo** | **$12,000/mo** |
+
+## 9. Multi-Strategy Retrieval (Added 2026-03)
+
+RAG is a capability, not a foundation. Different data → different retrieval strategy.
+
+### Strategy Matrix
+
+| Strategy | When to Use | Implementation |
+|----------|------------|----------------|
+| **CAG (Cache-Augmented)** | Corpus < 200 pages, rarely changes | Dump full corpus in LLM context. Zero infrastructure. 40x faster than RAG. |
+| **RAG (Retrieval-Augmented)** | 200-50,000 pages, periodic updates | Current hybrid approach (BM25 + vector + RRF). Production default. |
+| **JIT Context** | Live data (M365, email, CRM) | Query Graph API / IMAP at query time. Always fresh. No embedding pipeline. |
+| **Agentic RAG** | Complex multi-source questions | Agent plans retrieval: "search contracts, cross-reference emails, check policies." 87% multi-hop accuracy vs 23% for naive RAG. |
+
+### Auto-Detection Logic
+
+```
+Query arrives
+    ├── Corpus < 200 pages AND fits in context window?
+    │   YES → CAG (preload everything)
+    │
+    ├── Query references live data (email, calendar, recent)?
+    │   YES → JIT (fetch from connector APIs)
+    │
+    ├── Query is multi-hop / cross-source?
+    │   YES → Agentic RAG (planner + retriever chain)
+    │
+    └── DEFAULT → RAG (hybrid BM25 + vector + RRF)
+```
+
+### Why This Matters
+
+- CAG: 2.3 seconds vs RAG's 94 seconds for small corpora (40x improvement)
+- Agentic RAG: 87% accuracy on multi-hop questions vs 23% for naive top-k
+- JIT eliminates embedding pipeline maintenance for live data sources
+- Standard RAG sits in an awkward middle: slower than CAG for static, dumber than Agentic for complex
+
+CodeSight auto-picks the right strategy. No competitor does this.
+
+## 10. Updated Competitive Landscape (2026-03)
+
+### New Competitor: GoSearch
+- **Pricing:** ~$8/user/mo
+- **Positioning:** Budget Glean alternative
+- **Architecture:** RAG-first, faster deployment than Glean
+- **Weakness:** SaaS-only, no on-prem option, limited ACL depth
+- **Our edge:** On-prem + deep ACL + multi-strategy retrieval + consulting delivery
+
+## 11. Vector DB Strategy (Updated 2026-03)
+
+### Tiered Approach
+
+| Deployment | Size | Vector DB | Rationale |
+|-----------|------|-----------|-----------|
+| Mode A small (< 500 employees) | < 500K docs | LanceDB (embedded) | Zero infrastructure, file-based, perfect for consulting demos |
+| Mode A large (> 500 employees) | > 500K docs | Qdrant (server) | Scales, native payload filtering for ACLs, production-grade |
+| Mode B (Azure) | Any | Azure AI Search | Native security trimming, hybrid retrieval, managed service |
+
+LanceDB for simplicity, Qdrant for scale, Azure AI Search for cloud-native. All three share the same ingestion pipeline.

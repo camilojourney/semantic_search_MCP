@@ -1,59 +1,74 @@
 # Vision — codesight
 
+_Updated: 2026-03-03 — Aligned with RESEARCH.md_
+
 ## What It Is
 
-codesight is an AI-powered document search engine that you deploy for clients as a consulting tool. Point it at a folder of documents — PDFs, Word docs, presentations, code, markdown — and it indexes everything into a hybrid search index. Users ask questions in plain English and get precise answers with source citations.
+CodeSight is an AI-powered enterprise knowledge search appliance. Deploy it for a client — point it at their documents, emails, SharePoint — and it indexes everything into a hybrid search index with strict access control enforcement. Users ask questions in plain English and get precise answers with source citations. No unauthorized user ever sees content they shouldn't.
 
 ## The Core Business
 
-**Option B: Consulting tool — your secret weapon.**
+**Consulting tool → Enterprise product.**
 
-You walk into a company with a laptop. "Give me the folder of documents you need answers from." Index it, show them the web chat, they're amazed. Deliverable: a deployed instance + training. You charge for the engagement, not per user.
+Phase 1: Walk into a company with a laptop. "Give me access to your SharePoint and documents." Index it, show them the web chat, they're amazed. Deliverable: deployed instance + training + ongoing support. You charge for the engagement ($5K-50K depending on scope).
 
-You are not selling software. You are selling expertise + a fast way to make any document collection searchable with AI.
+Phase 2: Productize. Self-service deployment. Per-user licensing. Recurring revenue.
 
 ## The Problem
 
-Companies sit on mountains of documents — contracts, proposals, policies, technical specs, compliance records — spread across folders, drives, and systems. Finding specific information means manually searching through files, reading dozens of pages, and hoping you didn't miss anything. Knowledge workers spend 20%+ of their time searching for information.
+Enterprise knowledge is trapped in email threads, SharePoint folders, shared drives, and chat histories. Employees spend 9+ hours/week searching for information. When experts leave, their knowledge disappears.
+
+Existing solutions:
+- **Microsoft Copilot** ($30/user/mo) — data governance failures, surfaces confidential docs to unauthorized users
+- **Glean** ($45-50/user/mo) — too expensive for mid-market, 200-seat minimum
+- **Open source (Onyx/Danswer)** — no enterprise ACL, no compliance story
+- **GoSearch** ($8/user/mo) — SaaS only, no on-prem option
 
 ## The Solution
 
-Point codesight at a folder. It indexes everything into a hybrid search index. Then ask questions in natural language. codesight retrieves the most relevant chunks from across all documents and uses an LLM to synthesize a precise answer with source citations.
+Two deployment architectures for two trust levels:
 
-**The ultimate stack:**
-- **Search and indexing: 100% local.** Embedding model runs on the machine. No data leaves. Ever.
-- **Answer synthesis: client's choice.** Their own Claude API key, their Azure OpenAI tenant, or a local LLM (Ollama). They pick the trust level.
-- **Deployment: wherever they want.** Their Azure, their AWS, a VM, a laptop. Docker container runs anywhere.
+**Mode A — Strict Local-Only:** Nothing leaves the network. Local embeddings, local LLM, local vector DB. Air-gapped capable. For finance, defense, legal, healthcare.
 
-## Key Differentiator
+**Mode B — Azure-Native:** Fastest deployment. Azure AI Search + Azure OpenAI in client's own tenant. Entra ID for governance. For tech companies, professional services.
 
-**Hybrid BM25 + vector + RRF retrieval.** Most competitors (Glean, Azure AI Search, ChatPDF) use vector-only search. We combine keyword matching (BM25) with semantic search (vectors) via Reciprocal Rank Fusion. This catches what vector-only misses: exact contract numbers, dates, section references, vendor names.
+## Key Differentiators
 
-For scoped document collections (hundreds to thousands of documents), this hybrid approach matches or beats cloud search services — at zero ongoing search cost, with complete data privacy.
+1. **ACL enforcement at query time.** Permission filtering happens BEFORE the LLM sees any content. Not after. This is the #1 selling point.
+2. **Hybrid retrieval (BM25 + vector + RRF).** Catches exact matches (contract numbers, dates, vendor names) that vector-only competitors miss.
+3. **Multi-strategy retrieval.** Not everything is RAG. Auto-picks: CAG for small corpora, RAG for large, JIT for live data, Agentic RAG for complex multi-source questions.
+4. **On-prem option.** Glean can't do this. GoSearch can't do this. Copilot can't be trusted with it.
+5. **Mid-market pricing.** $15-25/user vs Glean's $45-50/user.
 
-## Delivery Channels
+## The Stack
 
-1. **Web Chat UI** (Streamlit) — browser-based Q&A for non-technical users
-2. **CLI** — developer-friendly command-line interface
-3. **Slack Bot** (planned) — answer questions directly in team channels
-4. **Python API** — `CodeSight` class for programmatic integration
+### Mode A (Local-Only)
+- Connectors: SharePoint (Graph API), Outlook, file shares
+- Embeddings: BAAI/bge-large or Nomic (local, no API)
+- Storage: LanceDB + SQLite FTS5 (small) | Qdrant (large)
+- LLM: Ollama / vLLM (Llama 3.1 70B, DeepSeek-V3)
+- Deploy: Docker on any machine
+
+### Mode B (Azure-Native)
+- Connectors: Microsoft Graph API (SharePoint, OneDrive, Outlook, Teams)
+- Embeddings: Azure OpenAI text-embedding-3-small
+- Storage: Azure AI Search (hybrid + security trimming)
+- LLM: Azure OpenAI GPT-4o (client's tenant)
+- Deploy: Azure App Service
+
+## Target Customer
+
+| Profile | Industries | Size | Budget | Sell Line |
+|---------|-----------|------|--------|-----------|
+| Strict Local | Finance, defense, legal | 200-2000 | $50K-200K/yr | "Nothing leaves your network." |
+| Azure-First | Tech, professional services | 100-1000 | $30K-150K/yr | "Your company's brain, inside your Azure." |
+| Compliance | Healthcare, gov contractors | Any | $50K-200K/yr | "AI search your compliance team approves." |
 
 ## Design Principles
 
-1. **Read-only** — codesight never writes to the indexed folder. Zero risk of data corruption.
-2. **Data stays local** — search and indexing run entirely on the machine. Only answer synthesis optionally calls an external API, and the client controls which one.
-3. **Pluggable LLM** — Claude API, Azure OpenAI, OpenAI, or Ollama (local). Client picks based on their security requirements.
-4. **Simple API** — four methods: `index()`, `search()`, `ask()`, `status()`. Any interface calls the same methods.
-5. **Deploy anywhere** — Docker container runs on Azure, AWS, GCP, on-prem, or a laptop.
-
-## Target User
-
-- **Primary:** Mid-size companies (20-500 people) who need their document collections searchable with AI — delivered via consulting engagement
-- **Secondary:** Consulting firms, legal teams, and auditors who need to quickly understand large document sets for specific projects
-- **Tertiary:** Developers who want semantic search over codebases and technical documentation
-
-## What CodeSight Is NOT
-
-- **Not a replacement for Microsoft Copilot.** If they already have Copilot searching across their M365, let it. CodeSight is for scoped project work, specific document folders, or companies without Copilot.
-- **Not a SaaS product (yet).** It's a consulting deliverable. The software is the tool; the value is the engagement.
-- **Not cloud-dependent.** The core engine runs locally. Cloud is optional for the LLM answer synthesis layer.
+1. **Security first** — ACL filtering before LLM sees content. Always.
+2. **Data stays where the client wants** — local, Azure, or hybrid.
+3. **Pluggable everything** — LLM, embeddings, vector DB, connectors.
+4. **Read-only** — never writes to source systems. Zero data corruption risk.
+5. **Right tool for the job** — CAG, RAG, JIT, or Agentic RAG depending on query.
+6. **Deploy anywhere** — Docker runs on Azure, AWS, on-prem, or a laptop.
